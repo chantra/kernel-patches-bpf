@@ -1022,10 +1022,10 @@ static int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 	__u32 __user *prog_attach_flags = u64_to_user_ptr(attr->query.prog_attach_flags);
 	bool effective_query = attr->query.query_flags & BPF_F_QUERY_EFFECTIVE;
 	__u32 __user *prog_ids = u64_to_user_ptr(attr->query.prog_ids);
+	struct bpf_prog_array *effective[MAX_CGROUP_BPF_ATTACH_TYPE];
 	enum bpf_attach_type type = attr->query.attach_type;
 	enum cgroup_bpf_attach_type from_atype, to_atype;
 	enum cgroup_bpf_attach_type atype;
-	struct bpf_prog_array *effective;
 	int cnt, ret = 0, i;
 	int total_cnt = 0;
 	u32 flags;
@@ -1051,9 +1051,9 @@ static int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 
 	for (atype = from_atype; atype <= to_atype; atype++) {
 		if (effective_query) {
-			effective = rcu_dereference_protected(cgrp->bpf.effective[atype],
-							      lockdep_is_held(&cgroup_mutex));
-			total_cnt += bpf_prog_array_length(effective);
+			effective[atype] = rcu_dereference_protected(cgrp->bpf.effective[atype],
+								     lockdep_is_held(&cgroup_mutex));
+			total_cnt += bpf_prog_array_length(effective[atype]);
 		} else {
 			total_cnt += prog_list_length(&cgrp->bpf.progs[atype]);
 		}
@@ -1076,10 +1076,8 @@ static int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 
 	for (atype = from_atype; atype <= to_atype && total_cnt; atype++) {
 		if (effective_query) {
-			effective = rcu_dereference_protected(cgrp->bpf.effective[atype],
-							      lockdep_is_held(&cgroup_mutex));
-			cnt = min_t(int, bpf_prog_array_length(effective), total_cnt);
-			ret = bpf_prog_array_copy_to_user(effective, prog_ids, cnt);
+			cnt = min_t(int, bpf_prog_array_length(effective[atype]), total_cnt);
+			ret = bpf_prog_array_copy_to_user(effective[atype], prog_ids, cnt);
 		} else {
 			struct hlist_head *progs;
 			struct bpf_prog_list *pl;
@@ -1118,11 +1116,23 @@ static int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 static int cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 			    union bpf_attr __user *uattr)
 {
+	__u32 __user *prog_attach_flags = u64_to_user_ptr(attr->query.prog_attach_flags);
+	bool effective_query = attr->query.query_flags & BPF_F_QUERY_EFFECTIVE;
+	bool need_mutex = false;
 	int ret;
 
-	mutex_lock(&cgroup_mutex);
+	if (effective_query && !prog_attach_flags)
+		need_mutex = false;
+
+	if (need_mutex)
+		mutex_lock(&cgroup_mutex);
+	else
+		rcu_read_lock();
 	ret = __cgroup_bpf_query(cgrp, attr, uattr);
-	mutex_unlock(&cgroup_mutex);
+	if (need_mutex)
+		mutex_unlock(&cgroup_mutex);
+	else
+		rcu_read_unlock();
 	return ret;
 }
 
